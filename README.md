@@ -1,6 +1,3 @@
-Here's the README content for you to copy:
-
----
 
 # Predicting Side Effects from Clinical Trial Data
 
