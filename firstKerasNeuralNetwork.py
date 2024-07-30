@@ -7,13 +7,15 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import make_scorer, accuracy_score #make_scorer allows you to create custom scoring function that can be used for all scoring parameters
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Activation, Dense
+from tensorflow.keras.layers import Activation, Dense, Input
 from keras.optimizers import Adam, SGD, RMSprop, Adadelta, Adagrad, Adamax, Nadam, Ftrl
 from keras.layers import LeakyReLU
-LeakyReLU = LeakyReLU(alpha=0.1)
+import keras_tuner as kt
+from tensorflow.keras.utils import to_categorical
+LeakyReLU = LeakyReLU(negative_slope=0.1)
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
-from bayes_opt import BayesianOptimization
-from keras.wrappers.scikit_learn import KerasClassifier
+from bayes_opt import BayesianOptimization, UtilityFunction
+from scikeras.wrappers import KerasClassifier
 import matplotlib.pyplot as plt 
 
 #Customized accuracy 
@@ -93,59 +95,64 @@ train_labels, train_samples = shuffle(train_labels, train_samples)
 test_labels, test_samples = shuffle(test_labels, test_samples)
 
 scaler = MinMaxScaler(feature_range=(0,1))
+
+#XValues (sample)
 scaled_train_sample = scaler.fit_transform(train_samples.reshape(-1,1))
 scaled_test_sample = scaler.fit_transform(test_samples.reshape(-1,1)) 
 
+#YValues (labels) HotEncodingTheseLabels
+train_labels = tf.keras.utils.to_categorical(train_labels,num_classes=2)
+test_labels = tf.keras.utils.to_categorical(test_labels, num_classes=2)
+
+
 #Hyper Tunning Values
 
-def baysOptimizer(neurons, activation, optimizer, learning_rate, batch_size, epoch):
-    activationF = ['relu', 'sigmoid', 'softplus', 'softsign', 'tanh', 'selu',
-                    'elu', 'exponential', LeakyReLU,'relu']
-
-    optimizerD = {"Adam":Adam(learning_rate), "SGD":SGD(learning_rate), "RMSprop":RMSprop(learning_rate),
-                "Adadelta":Adadelta(learning_rate), "Adagrad":Adagrad(learning_rate), 
-                "Adamax":Adamax(learning_rate), "Nadam":Nadam(learning_rate), "Ftrl":Ftrl(learning_rate)}
-    optimizerL = ['SGD', 'Adam', 'RMSprop', 'Adadelta', 'Adagrad', 'Adamax', 'Nadam', 'Ftrl']
+def baysOptimizer(hp):
+    #neurons, activation, optimizer, learning_rate, batch_size, epoch
 
     #Bayeisan might output non integer optimal values
-    activation = activationF[round(activation)] #Round and find the equivalency
-    neurons = round(neurons)
-    batch_size = round(batch_size)
-    epochs = round(epochs)
-    optimizerL = round(optimizer)
+    numNeuros = hp.Int('units', min_value=10, max_value=100, step=1)
+    activation = hp.Choice('activation', ['relu', 'sigmoid', 'softplus', 'softsign', 'tanh', 'selu',
+                    'elu', 'exponential','relu']) #LeakReLu Implementation
+    optimizer_choice = hp.Choice('optimizer', ['SGD', 'Adam', 'RMSprop', 'Adadelta', 'Adagrad', 'Adamax', 'Nadam', 'Ftrl'])
+    learning_rate = hp.Float('lr', min_value=0.0001, max_value=0.1, sampling='log') #Better for fine tunning at lower level
 
-    #Creates the hypertunned mode. 
-    def createModel():
-        model = Sequential()
-        model.add(Dense(units=neurons, input_dim=(1,), activation=activation))
-        model.add(Dense(units=neurons, activation=activation))
-        model.add(Dense(units=2, activation='softmax'))
-        model.compile(optimizer=optimizerD[optimizerL],loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-        return model 
+    # Dynamic optimizer selection
+    if optimizer_choice == 'SGD':
+        optimizer = SGD(learning_rate=learning_rate)
+    elif optimizer_choice == 'Adam':
+        optimizer = Adam(learning_rate=learning_rate)
+    elif optimizer_choice == 'RMSprop':
+        optimizer = RMSprop(learning_rate=learning_rate)
+    elif optimizer_choice == 'Adadelta':
+        optimizer = Adadelta(learning_rate=learning_rate)
+    elif optimizer_choice == 'Adagrad':
+        optimizer = Adagrad(learning_rate=learning_rate)
+    elif optimizer_choice == 'Adamax':
+        optimizer = Adamax(learning_rate=learning_rate)
+    elif optimizer_choice == 'Nadam':
+        optimizer = Nadam(learning_rate=learning_rate)
+    elif optimizer_choice == 'Ftrl':
+        optimizer = Ftrl(learning_rate=learning_rate)
 
-    model = KerasClassifier(build_fn=createModel, epochs=epoch, batch_size=batch_size) #Wrapping the model so sklearn use
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    model = Sequential()
+    model.add(Input(shape=(1,)))
+    model.add(Dense(units=numNeuros, activation=activation))
+    model.add(Dense(units=numNeuros, activation=activation))
+    model.add(Dense(units=2, activation='softmax')) #Final output 
 
-    #This is for testing 
-    score = cross_val_score(model,scaled_train_sample, train_labels, cv=skf, scoring=custom_accuracy)
-    return score 
+    model.compile(optimizer=optimizer,loss='categorical_crossentropy',metrics=['accuracy'])
 
+    return model 
 
+tuner = kt.BayesianOptimization(hypermodel=baysOptimizer,
+                                objective='accuracy', 
+                                max_trials = 45,
+                                num_initial_points=25, 
+                                directory='dir',
+                                project_name='x') #Trains Gaussian process model
+    
 
-params_nn = {
-    'neurons': (10, 100),
-    'activation':(0, 9),
-    'optimizer':(0,7),
-    'learning_rate':(0.01, 1),
-    'batch_size':(200, 1000),
-    'epochs':(20, 100)
-}
-
-baysOpt = BayesianOptimization(baysOptimizer, params_nn, random_state=42)
-baysOpt.maximize(init_points=25, n_iter=4) #Use 25 random select iterations to create surrogate model, 4 optimizing iterations after
-
-
-#rounded_predictions = np.argmax(predictions, axis=-1)
-
+tuner.search(scaled_train_sample, train_labels, validation_split=0.2, epochs=10) #Same as fit function
 
 
